@@ -1,0 +1,51 @@
+# Runs user-service + its PostgreSQL database.
+#
+# Config Server (8888) and Eureka (8761) are expected to be running on the host
+# (see README); the container reaches them via host.docker.internal.
+#
+#   docker compose up --build        # service + DB
+#   docker compose up -d postgres    # DB only, then run the app with mvn spring-boot:run
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: user-service-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-userdb}
+      POSTGRES_USER: ${DB_USERNAME:-userservice}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-userservice}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - user-service-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  user-service:
+    build: .
+    image: user-service:latest
+    container_name: user-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-userdb}
+      DB_USERNAME: ${DB_USERNAME:-userservice}
+      DB_PASSWORD: ${DB_PASSWORD:-userservice}
+      CONFIG_SERVER_URL: ${CONFIG_SERVER_URL:-http://host.docker.internal:8888}
+      EUREKA_URL: ${EUREKA_URL:-http://host.docker.internal:8761/eureka/}
+      # Register as localhost:8081 (the published port) rather than the container's internal IP
+      EUREKA_INSTANCE_PREFER_IP_ADDRESS: "false"
+      EUREKA_INSTANCE_HOSTNAME: localhost
+
+volumes:
+  user-service-pgdata:
