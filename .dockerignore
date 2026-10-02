@@ -3,3 +3,9 @@ target/
 .git/
 *.iml
 .env
+keys/
+*.pem
+*.key
+*.p12
+*.jks
+prompt/

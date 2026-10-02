@@ -2,6 +2,12 @@
 #
 # Config Server (8888) and Eureka (8761) are expected to be running on the host
 # (see README); the container reaches them via host.docker.internal.
+# Kafka is not part of this file (order-service's compose runs the shared broker on 9092). Until a broker is
+# reachable at KAFKA_BOOTSTRAP_SERVERS, events simply wait in the outbox table.
+#
+# Required before the first start (see README): an RSA key pair (JWT_PRIVATE_KEY / JWT_PUBLIC_KEY, PEM text) and
+# SUPER_ADMIN_EMAIL / SUPER_ADMIN_INITIAL_PASSWORD, e.g. in a git-ignored .env file next to this one.
+# The schema is created by Flyway: reset the old volume once with `docker compose down -v`.
 #
 #   docker compose up --build        # service + DB
 #   docker compose up -d postgres    # DB only, then run the app with mvn spring-boot:run
@@ -43,6 +49,18 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-userservice}
       CONFIG_SERVER_URL: ${CONFIG_SERVER_URL:-http://host.docker.internal:8888}
       EUREKA_URL: ${EUREKA_URL:-http://host.docker.internal:8761/eureka/}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-host.docker.internal:9092}
+      # Secrets: passed through from the environment / .env, never written here
+      # Empty = the service refuses to start (clear error); not ":?" so `up -d postgres` still works without them
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:-}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:-}
+      JWT_KEY_ID: ${JWT_KEY_ID:-user-service-rs256-1}
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-}
+      SUPER_ADMIN_INITIAL_PASSWORD: ${SUPER_ADMIN_INITIAL_PASSWORD:-}
+      # SERVICE_CLIENT_SECRET_STORE / _PRODUCT / _ORDER are required outside the "local" profile. They are not listed
+      # here because an empty value would override the Config Server fallback; add them (with values) when needed.
+      # Behind the api-gateway the client IP comes from X-Forwarded-For (login throttling)
+      AUTH_TRUST_FORWARDED_FOR: ${AUTH_TRUST_FORWARDED_FOR:-true}
       # Register as localhost:8081 (the published port) rather than the container's internal IP
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "false"
       EUREKA_INSTANCE_HOSTNAME: localhost

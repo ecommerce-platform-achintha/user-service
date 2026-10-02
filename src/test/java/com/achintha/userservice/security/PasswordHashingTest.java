@@ -1,93 +1,51 @@
 package com.achintha.userservice.security;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
+import com.achintha.userservice.common.PasswordPolicy;
 import com.achintha.userservice.config.SecurityConfig;
-import com.achintha.userservice.user.RegisterRequest;
-import com.achintha.userservice.user.Role;
-import com.achintha.userservice.user.User;
-import com.achintha.userservice.user.UserRepository;
-import com.achintha.userservice.user.UserResponse;
-import com.achintha.userservice.user.UserService;
-import java.lang.reflect.RecordComponent;
-import java.util.Arrays;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
-@ExtendWith(MockitoExtension.class)
 class PasswordHashingTest {
 
-    private static final String RAW_PASSWORD = "Str0ng!Passw0rd";
+    private static final String RAW_PASSWORD = "Correct-Horse-Battery-9";
 
-    private final PasswordEncoder passwordEncoder = new SecurityConfig().passwordEncoder();
-
-    @Mock
-    private UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder = SecurityConfig.createPasswordEncoder();
 
     @Test
-    void encodesWithBcrypt() {
+    void encodesWithArgon2idByDefault() {
         String hash = passwordEncoder.encode(RAW_PASSWORD);
 
-        assertThat(hash).isNotEqualTo(RAW_PASSWORD).startsWith("$2");
+        assertThat(hash).startsWith("{argon2}$argon2id$").doesNotContain(RAW_PASSWORD);
         assertThat(passwordEncoder.matches(RAW_PASSWORD, hash)).isTrue();
-    }
-
-    @Test
-    void rejectsWrongPassword() {
-        String hash = passwordEncoder.encode(RAW_PASSWORD);
-
-        assertThat(passwordEncoder.matches("Str0ng!Passw0rD", hash)).isFalse();
-        assertThat(passwordEncoder.matches("", hash)).isFalse();
+        assertThat(passwordEncoder.matches(RAW_PASSWORD + "x", hash)).isFalse();
+        assertThat(passwordEncoder.upgradeEncoding(hash)).isFalse();
     }
 
     @Test
     void saltsEachHash() {
-        String first = passwordEncoder.encode(RAW_PASSWORD);
-        String second = passwordEncoder.encode(RAW_PASSWORD);
-
-        assertThat(first).isNotEqualTo(second);
-        assertThat(passwordEncoder.matches(RAW_PASSWORD, first)).isTrue();
-        assertThat(passwordEncoder.matches(RAW_PASSWORD, second)).isTrue();
+        assertThat(passwordEncoder.encode(RAW_PASSWORD)).isNotEqualTo(passwordEncoder.encode(RAW_PASSWORD));
     }
 
     @Test
-    void registerStoresOnlyTheHashAndNeverReturnsIt() {
-        UserService userService = new UserService(userRepository, passwordEncoder);
-        when(userRepository.existsByEmail("jane@example.com")).thenReturn(false);
-        when(userRepository.saveAndFlush(any(User.class))).thenAnswer(inv -> {
-            User u = inv.getArgument(0);
-            u.setId(UUID.randomUUID());
-            return u;
-        });
+    void stillVerifiesBcryptHashesAndFlagsThemForUpgrade() {
+        String bcrypt = new BCryptPasswordEncoder().encode(RAW_PASSWORD);
 
-        UserResponse response = userService.register(
-                new RegisterRequest("  Jane@Example.com ", RAW_PASSWORD, "Jane", "Doe"));
-
-        ArgumentCaptor<User> saved = ArgumentCaptor.forClass(User.class);
-        verify(userRepository).saveAndFlush(saved.capture());
-        String storedPassword = saved.getValue().getPassword();
-        assertThat(storedPassword).isNotEqualTo(RAW_PASSWORD).startsWith("$2");
-        assertThat(passwordEncoder.matches(RAW_PASSWORD, storedPassword)).isTrue();
-
-        assertThat(response.email()).isEqualTo("jane@example.com");
-        assertThat(response.roles()).containsExactly(Role.ROLE_CUSTOMER);
-        assertThat(Arrays.stream(UserResponse.class.getRecordComponents()).map(RecordComponent::getName))
-                .doesNotContain("password");
-        assertThat(response.toString()).doesNotContain(RAW_PASSWORD).doesNotContain(storedPassword);
+        assertThat(passwordEncoder.matches(RAW_PASSWORD, "{bcrypt}" + bcrypt)).isTrue();
+        assertThat(passwordEncoder.matches(RAW_PASSWORD, bcrypt)).isTrue(); // legacy, no {id} prefix
+        assertThat(passwordEncoder.upgradeEncoding("{bcrypt}" + bcrypt)).isTrue();
     }
 
     @Test
-    void registerRequestToStringMasksPassword() {
-        RegisterRequest request = new RegisterRequest("jane@example.com", RAW_PASSWORD, "Jane", "Doe");
-
-        assertThat(request.toString()).doesNotContain(RAW_PASSWORD);
+    void policyRequiresTwelveCharactersAndRejectsCommonPasswords() {
+        assertThat(PasswordPolicy.check("Short-1")).contains("at least 12");
+        assertThat(PasswordPolicy.check("Password1234")).contains("too common");
+        assertThat(PasswordPolicy.check("aaaaaaaaaaaaab")).contains("different characters");
+        assertThat(PasswordPolicy.check(" padded-password ")).contains("whitespace");
+        assertThat(PasswordPolicy.check("x".repeat(129))).contains("at most");
+        assertThat(PasswordPolicy.check(RAW_PASSWORD)).isNull();
+        assertThat(PasswordPolicy.check("long passphrase without digits")).isNull();
     }
 }

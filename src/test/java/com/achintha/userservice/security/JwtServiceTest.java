@@ -3,109 +3,191 @@ package com.achintha.userservice.security;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.achintha.userservice.config.AuthProperties;
+import com.achintha.userservice.config.InternalAuthProperties;
 import com.achintha.userservice.config.JwtProperties;
+import com.achintha.userservice.config.RsaKeyLoader;
 import com.achintha.userservice.config.SecurityConfig;
 import com.achintha.userservice.security.JwtService.AccessToken;
+import com.achintha.userservice.support.TestKeys;
+import com.achintha.userservice.user.AssistantPermission;
+import com.achintha.userservice.user.AssistantStatus;
 import com.achintha.userservice.user.Role;
 import com.achintha.userservice.user.User;
+import com.achintha.userservice.user.UserStatus;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.interfaces.RSAPublicKey;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Base64;
+import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import javax.crypto.SecretKey;
-import org.junit.jupiter.api.BeforeEach;
+import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
+import org.springframework.core.io.DefaultResourceLoader;
+import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
+import org.springframework.security.oauth2.jwt.JwsHeader;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtClaimsSet;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
 import org.springframework.security.oauth2.jwt.JwtException;
+import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
 
 class JwtServiceTest {
 
-    private static final String SECRET = "test-secret-that-is-at-least-32-bytes-long!!";
-    private static final Duration TTL = Duration.ofMinutes(15);
+    private static final AuthProperties AUTH = new AuthProperties(10, 14, 5, 15, 20, false);
+    private static final InternalAuthProperties INTERNAL = new InternalAuthProperties(5, List.of());
 
     private final SecurityConfig securityConfig = new SecurityConfig();
-    private final JwtProperties properties = new JwtProperties(SECRET, "user-service", TTL);
+    private final JwtProperties properties = properties("user-service", "marketplace", TestKeys.KEY_PAIR);
 
-    private JwtDecoder decoder;
-    private User user;
+    @Test
+    void merchantTokenCarriesExactlyTheContractClaims() {
+        User merchant = user(Role.ROLE_MERCHANT, UserStatus.ACTIVE);
+        merchant.setStoreId(UUID.randomUUID());
 
-    @BeforeEach
-    void setUp() {
-        decoder = decoderFor(properties);
-        user = new User();
-        user.setId(UUID.randomUUID());
-        user.setEmail("jane@example.com");
-        user.setRoles(Set.of(Role.ROLE_CUSTOMER, Role.ROLE_ADMIN));
+        Jwt jwt = decoder().decode(service(properties, TestKeys.KEY_PAIR, Clock.systemUTC())
+                .generateAccessToken(merchant).value());
+
+        assertThat(jwt.getClaims().keySet()).containsExactlyInAnyOrder(
+                "sub", "pid", "role", "status", "storeId", "tv", "iss", "aud", "iat", "exp", "jti");
+        assertThat(jwt.getSubject()).isEqualTo(merchant.getId().toString());
+        assertThat(jwt.getClaimAsString("pid")).isEqualTo("USR-2610-ABCDEF");
+        assertThat(jwt.getClaimAsString("role")).isEqualTo("ROLE_MERCHANT");
+        assertThat(jwt.getClaimAsString("storeId")).isEqualTo(merchant.getStoreId().toString());
+        assertThat(((Number) jwt.getClaim("tv")).longValue()).isEqualTo(3L);
+        assertThat(jwt.getAudience()).containsExactly("marketplace");
+        assertThat(jwt.getHeaders()).containsEntry("alg", "RS256").containsEntry("kid", "test-kid");
+        assertThat(Duration.between(jwt.getIssuedAt(), jwt.getExpiresAt())).isEqualTo(Duration.ofMinutes(10));
     }
 
     @Test
-    void generatedTokenValidatesAndCarriesClaims() {
-        Instant before = Instant.now();
-        AccessToken token = serviceWith(properties, Clock.systemUTC()).generateAccessToken(user);
+    void assistantTokenCarriesPermissionsAndBanGraceIsHidden() {
+        User assistant = user(Role.ROLE_ASSISTANT, UserStatus.ACTIVE);
+        assistant.setStoreId(UUID.randomUUID());
+        assistant.setAssistantStatus(AssistantStatus.ACTIVE);
+        assistant.setPermissions(EnumSet.of(AssistantPermission.ORDER_VIEW, AssistantPermission.ORDER_SHIP));
+        User graceMerchant = user(Role.ROLE_MERCHANT, UserStatus.BAN_GRACE);
+        graceMerchant.setStoreId(UUID.randomUUID());
+        JwtService service = service(properties, TestKeys.KEY_PAIR, Clock.systemUTC());
 
-        Jwt jwt = decoder.decode(token.value());
+        Jwt assistantJwt = decoder().decode(service.generateAccessToken(assistant).value());
+        Jwt merchantJwt = decoder().decode(service.generateAccessToken(graceMerchant).value());
 
-        assertThat(jwt.getSubject()).isEqualTo(user.getId().toString());
-        assertThat(jwt.getClaimAsString("email")).isEqualTo("jane@example.com");
-        assertThat(jwt.getClaimAsStringList(SecurityConfig.ROLES_CLAIM))
-                .containsExactlyInAnyOrder("ROLE_CUSTOMER", "ROLE_ADMIN");
-        assertThat(jwt.getClaimAsString("iss")).isEqualTo("user-service");
-        assertThat(jwt.getHeaders()).containsEntry("alg", "HS256");
-        assertThat(Duration.between(jwt.getIssuedAt(), jwt.getExpiresAt())).isEqualTo(TTL);
-        assertThat(jwt.getIssuedAt()).isAfterOrEqualTo(before.minusSeconds(1));
-        assertThat(token.expiresInSeconds()).isEqualTo(TTL.toSeconds());
+        assertThat(assistantJwt.getClaimAsStringList("perms")).containsExactly("ORDER_SHIP", "ORDER_VIEW");
+        assertThat(merchantJwt.getClaimAsString("status")).isEqualTo("ACTIVE");
+        assertThat(merchantJwt.getClaims()).doesNotContainKey("perms");
+    }
+
+    @Test
+    void serviceTokenHasServiceRoleAndSvcClaim() {
+        AccessToken token = service(properties, TestKeys.KEY_PAIR, Clock.systemUTC())
+                .generateServiceToken("order-service");
+        Jwt jwt = decoder().decode(token.value());
+
+        assertThat(jwt.getClaimAsString("role")).isEqualTo("ROLE_SERVICE");
+        assertThat(jwt.getClaimAsString("svc")).isEqualTo("order-service");
+        assertThat(jwt.getAudience()).containsExactly("marketplace");
+        assertThat(token.expiresInSeconds()).isEqualTo(300);
     }
 
     @Test
     void rejectsExpiredToken() {
-        // Issued long enough ago that it is past expiry plus the default 60s clock skew
-        Clock past = Clock.fixed(Instant.now().minus(TTL).minusSeconds(120), ZoneOffset.UTC);
-        String token = serviceWith(properties, past).generateAccessToken(user).value();
+        // Past expiry plus the 30 s skew
+        Clock past = Clock.fixed(Instant.now().minus(Duration.ofMinutes(11)), ZoneOffset.UTC);
+        String token = service(properties, TestKeys.KEY_PAIR, past)
+                .generateAccessToken(user(Role.ROLE_CUSTOMER, UserStatus.ACTIVE)).value();
 
-        assertThatThrownBy(() -> decoder.decode(token)).isInstanceOf(JwtException.class)
+        assertThatThrownBy(() -> decoder().decode(token)).isInstanceOf(JwtException.class)
                 .hasMessageContaining("expired");
     }
 
     @Test
-    void rejectsTamperedToken() {
-        String token = serviceWith(properties, Clock.systemUTC()).generateAccessToken(user).value();
-        String[] parts = token.split("\\.");
-        char last = parts[2].charAt(0);
-        String tampered = parts[0] + "." + parts[1] + "." + (last == 'A' ? 'B' : 'A') + parts[2].substring(1);
+    void rejectsTokenSignedWithAnotherKey() {
+        KeyPair other = TestKeys.generate();
+        String token = service(properties("user-service", "marketplace", other), other, Clock.systemUTC())
+                .generateAccessToken(user(Role.ROLE_CUSTOMER, UserStatus.ACTIVE)).value();
 
-        assertThatThrownBy(() -> decoder.decode(tampered)).isInstanceOf(JwtException.class);
+        assertThatThrownBy(() -> decoder().decode(token)).isInstanceOf(JwtException.class);
     }
 
     @Test
-    void rejectsTokenSignedWithDifferentSecret() {
-        JwtProperties other = new JwtProperties("another-secret-that-is-also-32-bytes-long!", "user-service", TTL);
-        String token = serviceWith(other, Clock.systemUTC()).generateAccessToken(user).value();
+    void rejectsWrongIssuerOrAudience() {
+        String wrongIssuer = service(properties("someone-else", "marketplace", TestKeys.KEY_PAIR),
+                TestKeys.KEY_PAIR, Clock.systemUTC()).generateAccessToken(user(Role.ROLE_CUSTOMER, UserStatus.ACTIVE))
+                .value();
+        String wrongAudience = service(properties("user-service", "other-app", TestKeys.KEY_PAIR),
+                TestKeys.KEY_PAIR, Clock.systemUTC()).generateAccessToken(user(Role.ROLE_CUSTOMER, UserStatus.ACTIVE))
+                .value();
 
-        assertThatThrownBy(() -> decoder.decode(token)).isInstanceOf(JwtException.class);
+        assertThatThrownBy(() -> decoder().decode(wrongIssuer)).isInstanceOf(JwtException.class);
+        assertThatThrownBy(() -> decoder().decode(wrongAudience)).isInstanceOf(JwtException.class);
     }
 
     @Test
-    void rejectsTokenFromDifferentIssuer() {
-        JwtProperties otherIssuer = new JwtProperties(SECRET, "someone-else", TTL);
-        String token = serviceWith(otherIssuer, Clock.systemUTC()).generateAccessToken(user).value();
+    void rejectsHs256AndUnsignedTokens() {
+        byte[] secret = "a-shared-secret-that-is-32-bytes-long!!".getBytes(StandardCharsets.UTF_8);
+        String hs256 = NimbusJwtEncoder.withSecretKey(new SecretKeySpec(secret, "HmacSHA256")).build()
+                .encode(JwtEncoderParameters.from(JwsHeader.with(MacAlgorithm.HS256).build(),
+                        JwtClaimsSet.builder().issuer("user-service").audience(List.of("marketplace"))
+                                .subject(UUID.randomUUID().toString()).claim("role", "ROLE_ADMIN")
+                                .expiresAt(Instant.now().plusSeconds(60)).build()))
+                .getTokenValue();
+        Base64.Encoder b64 = Base64.getUrlEncoder().withoutPadding();
+        String unsigned = b64.encodeToString("{\"alg\":\"none\"}".getBytes(StandardCharsets.UTF_8)) + "."
+                + b64.encodeToString(("{\"sub\":\"x\",\"role\":\"ROLE_ADMIN\",\"iss\":\"user-service\","
+                + "\"aud\":[\"marketplace\"]}").getBytes(StandardCharsets.UTF_8)) + ".";
 
-        assertThatThrownBy(() -> decoder.decode(token)).isInstanceOf(JwtException.class);
+        assertThatThrownBy(() -> decoder().decode(hs256)).isInstanceOf(JwtException.class);
+        assertThatThrownBy(() -> decoder().decode(unsigned)).isInstanceOf(JwtException.class);
+        assertThatThrownBy(() -> decoder().decode("not-a-jwt")).isInstanceOf(JwtException.class);
     }
 
     @Test
-    void rejectsGarbage() {
-        assertThatThrownBy(() -> decoder.decode("not-a-jwt")).isInstanceOf(JwtException.class);
+    void keyLoaderRejectsMismatchedPublicKey() {
+        KeyPair other = TestKeys.generate();
+        JwtProperties.Signing mismatched = new JwtProperties.Signing(TestKeys.PRIVATE_PEM,
+                TestKeys.pem("PUBLIC KEY", other.getPublic().getEncoded()), "kid");
+
+        assertThatThrownBy(() -> RsaKeyLoader.load(mismatched, new DefaultResourceLoader()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageNotContaining("BEGIN");
     }
 
-    private JwtService serviceWith(JwtProperties props, Clock clock) {
-        SecretKey key = securityConfig.jwtSigningKey(props);
-        return new JwtService(securityConfig.jwtEncoder(key), props, clock);
+    private JwtDecoder decoder() {
+        return securityConfig.jwtDecoder(keys(TestKeys.KEY_PAIR), properties, Clock.systemUTC());
     }
 
-    private JwtDecoder decoderFor(JwtProperties props) {
-        return securityConfig.jwtDecoder(securityConfig.jwtSigningKey(props), props);
+    private JwtService service(JwtProperties props, KeyPair keyPair, Clock clock) {
+        return new JwtService(securityConfig.jwtEncoder(keys(keyPair), props), props, AUTH, INTERNAL, clock);
+    }
+
+    private static RsaKeyLoader.KeyPair keys(KeyPair keyPair) {
+        return new RsaKeyLoader.KeyPair((RSAPublicKey) keyPair.getPublic(), (RSAPrivateKey) keyPair.getPrivate());
+    }
+
+    private static JwtProperties properties(String issuer, String audience, KeyPair keyPair) {
+        return new JwtProperties(issuer, audience, 30, new JwtProperties.Signing(
+                TestKeys.pem("PRIVATE KEY", keyPair.getPrivate().getEncoded()),
+                TestKeys.pem("PUBLIC KEY", keyPair.getPublic().getEncoded()), "test-kid"));
+    }
+
+    private static User user(Role role, UserStatus status) {
+        User user = new User();
+        user.setId(UUID.randomUUID());
+        user.setPublicId("USR-2610-ABCDEF");
+        user.setEmail("jane@example.com");
+        user.setRole(role);
+        user.setStatus(status);
+        user.setTokenVersion(3);
+        user.setPermissions(Set.of());
+        return user;
     }
 }

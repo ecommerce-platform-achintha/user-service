@@ -1,0 +1,39 @@
+package com.achintha.userservice.exception;
+
+/** Stable, machine-readable error codes returned in {@link ApiError#code()}. Never rename a published code. */
+public enum ErrorCode {
+    // Generic
+    VALIDATION_FAILED,
+    MALFORMED_REQUEST,
+    BAD_REQUEST,
+    INVALID_SORT,
+    NOT_FOUND,
+    METHOD_NOT_ALLOWED,
+    UNSUPPORTED_MEDIA_TYPE,
+    CONCURRENT_MODIFICATION,
+    INTERNAL_ERROR,
+
+    // Authentication and authorization
+    UNAUTHORIZED,
+    ACCESS_DENIED,
+    INVALID_CREDENTIALS,
+    TOO_MANY_LOGIN_ATTEMPTS,
+    ACCOUNT_BANNED,
+    ACCOUNT_REMOVED,
+    MERCHANT_BANNED,
+    PASSWORD_CHANGE_REQUIRED,
+    TOKEN_REVOKED,
+    INVALID_REFRESH_TOKEN,
+    REFRESH_TOKEN_REUSED,
+    INVALID_CLIENT_CREDENTIALS,
+    WEAK_PASSWORD,
+    PASSWORD_REUSED,
+
+    // Accounts and onboarding
+    EMAIL_ALREADY_EXISTS,
+    NIC_ALREADY_ASSIGNED,
+    INVALID_STATUS_TRANSITION,
+    MERCHANT_NOT_ACTIVE,
+    APPLICATION_LIMIT_REACHED,
+    ADDRESS_LIMIT_REACHED
+}

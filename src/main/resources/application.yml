@@ -7,24 +7,93 @@ spring:
   config:
     # "optional:" lets the service start even when the Config Server is down.
     # Override with CONFIG_SERVER_URL, e.g. inside Docker where localhost is the container.
-    # The JWT signing secret (security.jwt.secret) is supplied by the Config Server
-    # (config-repo/user-service.yml); there is deliberately no local default, so the
-    # service refuses to start without it.
+    # The RS256 signing keys, internal client secrets and super-admin bootstrap values come from the Config Server
+    # (config-repo/user-service.yml) or the environment; there are deliberately no local defaults for them.
     import: optional:configserver:${CONFIG_SERVER_URL:http://localhost:8888}
   datasource:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:userdb}
     username: ${DB_USERNAME:userservice}
     password: ${DB_PASSWORD:userservice}
   jpa:
-    # Temporary: schema managed by Hibernate until Flyway/Liquibase migrations are introduced.
+    # Schema is owned by Flyway (src/main/resources/db/migration); Hibernate only checks it matches the entities.
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
     open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      # The outbox relay sends the stored JSON payload as-is, keyed by the user's UUID
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
 
+# Local fallbacks mirroring config-repo (application.yml + user-service.yml). The Config Server wins when reachable.
 security:
   jwt:
-    issuer: user-service
-    access-token-ttl: 15m
+    issuer: ${JWT_ISSUER:user-service}
+    audience: ${JWT_AUDIENCE:marketplace}
+    clock-skew-seconds: ${JWT_CLOCK_SKEW_SECONDS:30}
+    signing:
+      # PEM text ("-----BEGIN ...") or a resource location (file:./keys/jwt-private.pem). No default on purpose.
+      private-key: ${JWT_PRIVATE_KEY:}
+      public-key: ${JWT_PUBLIC_KEY:}
+      key-id: ${JWT_KEY_ID:user-service-rs256-1}
+  internal:
+    service-token-minutes: 5
+    # Registered clients (client-id + client-secret) come from the Config Server, see config-repo/user-service.yml
+    clients: []
+
+auth:
+  access-token-minutes: 10
+  refresh-days: 14
+  max-failed-logins: 5
+  lockout-minutes: 15
+  # Failures counted per client IP before that IP is locked for lockout-minutes
+  ip-max-failed-logins: ${AUTH_IP_MAX_FAILED_LOGINS:20}
+  # Behind the api-gateway every request comes from the gateway's address, so set this to true there: the client IP
+  # is then the last X-Forwarded-For entry (the one the gateway appended). Never enable it without a trusted proxy.
+  trust-forwarded-for: ${AUTH_TRUST_FORWARDED_FOR:false}
+
+timers:
+  ban-grace-days: 14
+
+merchant:
+  max-application-attempts: 3
+
+bootstrap:
+  super-admin:
+    email: ${SUPER_ADMIN_EMAIL:}
+    initial-password: ${SUPER_ADMIN_INITIAL_PASSWORD:}
+
+app:
+  timezone: ${APP_TIMEZONE:Asia/Colombo}
+  max-addresses-per-user: 20
+  kafka:
+    topics:
+      user-events: ${KAFKA_TOPIC_USER_EVENTS:user-events}
+  scheduling:
+    # Turns all @Scheduled jobs off (tests trigger the jobs directly)
+    enabled: true
+    shedlock:
+      enabled: ${SHEDLOCK_ENABLED:true}
+      default-lock-at-most-for: PT10M
+    ban-enforcement:
+      interval: PT5M
+  outbox:
+    relay-interval: PT1S
+    batch-size: 100
+  ports:
+    # Mock adapters for the external providers (log only, always succeed). Set to another value once a real
+    # adapter exists.
+    notification: mock
+    verification: mock
 
 eureka:
   client:
@@ -38,7 +107,12 @@ management:
     web:
       exposure:
         include: health,info
+  endpoint:
+    health:
+      show-details: never
 
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
+  # Internal (service-to-service) endpoints are never part of the public API docs
+  paths-to-exclude: /internal/**

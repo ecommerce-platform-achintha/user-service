@@ -1,21 +1,38 @@
 package com.achintha.userservice.config;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Size;
-import java.time.Duration;
+import jakarta.validation.constraints.PositiveOrZero;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 /**
- * JWT settings. {@code secret} has no default on purpose: it must come from the
- * Config Server (or the SECURITY_JWT_SECRET env var), and startup fails without it.
+ * Access-token settings (section 3.3). The signing keys have no default on purpose: they come from the Config Server
+ * or the JWT_PRIVATE_KEY / JWT_PUBLIC_KEY environment variables, and startup fails without them.
  */
 @Validated
 @ConfigurationProperties("security.jwt")
 public record JwtProperties(
-        // HS256 requires a key of at least 256 bits
-        @NotBlank @Size(min = 32, message = "must be at least 32 characters (256 bits) for HS256") String secret,
         @NotBlank String issuer,
-        @NotNull Duration accessTokenTtl) {
+        @NotBlank String audience,
+        @PositiveOrZero long clockSkewSeconds,
+        @NotNull @Valid Signing signing) {
+
+    /**
+     * @param privateKey PKCS#8 PEM text ("-----BEGIN PRIVATE KEY-----") or a resource location
+     *                   ({@code file:./keys/jwt-private.pem})
+     * @param publicKey  X.509 PEM text ("-----BEGIN PUBLIC KEY-----") or a resource location
+     * @param keyId      the {@code kid} header and JWKS entry id
+     */
+    public record Signing(
+            @NotBlank(message = "is required (JWT_PRIVATE_KEY): PEM text or a resource location") String privateKey,
+            @NotBlank(message = "is required (JWT_PUBLIC_KEY): PEM text or a resource location") String publicKey,
+            @NotBlank String keyId) {
+
+        @Override
+        public String toString() {
+            return "Signing[privateKey=****, publicKey=" + publicKey + ", keyId=" + keyId + "]";
+        }
+    }
 }

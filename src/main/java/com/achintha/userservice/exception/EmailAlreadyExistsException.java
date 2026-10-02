@@ -1,8 +1,10 @@
 package com.achintha.userservice.exception;
 
-public class EmailAlreadyExistsException extends RuntimeException {
+import org.springframework.http.HttpStatus;
 
-    public EmailAlreadyExistsException(String email) {
-        super("An account with email " + email + " already exists");
+public class EmailAlreadyExistsException extends ApiException {
+
+    public EmailAlreadyExistsException() {
+        super(HttpStatus.CONFLICT, ErrorCode.EMAIL_ALREADY_EXISTS, "An account with this email already exists");
     }
 }
