@@ -58,6 +58,10 @@ public class JwtService {
             claims.claim(TokenClaims.PERMISSIONS,
                     user.effectivePermissions().stream().map(AssistantPermission::name).sorted().toList());
         }
+        if (user.isMustChangePassword()) {
+            // Omitted otherwise, so the claim set of normal tokens stays as in section 3.3
+            claims.claim(TokenClaims.MUST_CHANGE_PASSWORD, true);
+        }
         return new AccessToken(encode(claims.build()), now, expiresAt);
     }
 
